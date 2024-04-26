@@ -1,3 +1,5 @@
 logs/
 .idea
 __pycache__
+continuous_logs/
+continuous_logs2/

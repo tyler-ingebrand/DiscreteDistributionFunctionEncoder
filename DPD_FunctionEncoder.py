@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
-from VectorSpace import dpd_inner_product, dpd_multiply, dpd_add
+# from VectorSpace import dpd_inner_product, dpd_multiply, dpd_add
 
 # suppose we have a set of functions mapping from [0,1] to K, where K is a category set
 # for simplicity, assume the functions are defined by the ranges for which each is dominant.
@@ -17,7 +17,7 @@ seed = 0
 n_basis = 110
 descent_steps = 100_000
 n_datapoints = 1000
-device = "cuda:0"
+device = "cpu"
 
 # example data confidence. How much we trust the example data, IE 95% confidence
 example_data_confidence = 0.95
@@ -67,6 +67,12 @@ class DPD_FunctionEncoder(torch.nn.Module):
         logits = self.model(x).view(-1, self.n_basis, self.n_categories)
         return logits
 
+def dpd_inner_product(p_1:torch.tensor, p_2:torch.tensor) -> torch.tensor:
+    # logit space
+    mean_a = torch.mean(p_1, dim=-1, keepdim=True)
+    mean_b = torch.mean(p_2, dim=-1, keepdim=True)
+    return torch.sum((p_1 - mean_a) * (p_2 - mean_b), dim=-1)
+
 model = DPD_FunctionEncoder(n_basis, n_categories).to(device)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -86,24 +92,20 @@ for descent_step in trange(descent_steps):
     example_ys_ohe = torch.nn.functional.one_hot(example_ys, n_categories).float()
     smoothed_example_ys_ohe = example_ys_ohe * example_data_logit
 
+    # this is the inner product to compute representations
     individual_example_encodings = dpd_inner_product(example_basis_data.unsqueeze(0), smoothed_example_ys_ohe.unsqueeze(2))
     encodings = torch.mean(individual_example_encodings, dim=1)
 
-    # approximate function
+    # approximate function as weighted cominbation of basis functions
     basis_data = model(xs.unsqueeze(-1)).squeeze()
-    individual_encodings = dpd_multiply(basis_data.unsqueeze(0), encodings.unsqueeze(1).unsqueeze(-1))
-    # y_hat = individual_encodings[:, :, 0, :]
-    # for i in range(1, n_basis):
-    #     y_hat = dpd_add(y_hat, individual_encodings[:, :, i, :])
-    # y hats are logits
-    logits = torch.sum(individual_encodings, dim=-2)
+    individual_encodings = basis_data.unsqueeze(0) * encodings.unsqueeze(1).unsqueeze(-1)
+    logits = torch.mean(individual_encodings, dim=-2)
 
     if torch.isnan(logits).any():
         print("NaN detected")
 
     # compute loss
     loss = torch.nn.CrossEntropyLoss()(logits.view(-1, n_categories), ys.view(-1))
-
 
     # backprop
     opt.zero_grad()
@@ -119,7 +121,7 @@ for descent_step in trange(descent_steps):
 
 # Graphs!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # now see if it works for 9 functions (graph them)
-n_sample_functions = 9
+n_sample_functions = 8
 functions, barriers, chosen_categories = sample_functions(n_sample_functions, n_categories, input_space)
 
 # generate data
@@ -136,8 +138,8 @@ encodings = torch.mean(individual_encodings, dim=1)
 
 # approximate function
 basis_data = model(xs.unsqueeze(-1)).squeeze()
-individual_encodings = dpd_multiply(basis_data.unsqueeze(0), encodings.unsqueeze(1).unsqueeze(-1))
-logits = torch.sum(individual_encodings, dim=-2)
+individual_encodings = basis_data.unsqueeze(0) * encodings.unsqueeze(1).unsqueeze(-1)
+logits = torch.mean(individual_encodings, dim=-2)
 y_hat = torch.nn.functional.softmax(logits, dim=-1)
 
 
@@ -145,34 +147,40 @@ def to_cpu(tensor):
     return tensor.detach().cpu().numpy()
 
 # plot the functions along with the probability distributions
-fig, ax = plt.subplots(3, 3, figsize=(10, 10))
+n_rows, n_cols = 2,4
+width, height = n_rows * 3, n_cols * 3
+fig, ax = plt.subplots(n_rows, n_cols, figsize=(height, width))
 colors = "r", "g", "b", "c", "m", "y", "k", "orange", "purple"
 labels = list([chr(ord('A') + i) for i in range(n_categories)])
 
-for i in range(n_sample_functions):
-    ax[i//3][i%3].plot(to_cpu(xs), to_cpu(ys[i]), label="true", color="black")
+for i in range(n_rows * n_cols):
+    ax[i//n_cols][i%n_cols].plot(to_cpu(xs), to_cpu(ys[i]), label="True", color="black")
     for b, color, l in zip(reversed(range(n_categories)), colors, labels):
-        ax[i//3][i%3].plot(to_cpu(xs), to_cpu(2 * y_hat[i][:, b]), label=l, color=color)
-    ax[i//3][i%3].set_yticks([i for i in range(n_categories)])
-    ax[i//3][i%3].set_yticklabels(reversed([chr(ord('A') + i) for i in range(n_categories)]))
-ax[2][2].legend()
+        ax[i//n_cols][i%n_cols].plot(to_cpu(xs), to_cpu(2 * y_hat[i][:, b]), label=l, color=color)
+    ax[i//n_cols][i%n_cols].set_yticks([i for i in range(n_categories)])
+    ax[i//n_cols][i%n_cols].set_yticklabels(reversed([chr(ord('A') + i) for i in range(n_categories)]))
+ax[0][0].legend()
 fig.tight_layout()
 
 # save the plot
-plt.savefig(f"{logdir}/prob.png")
+plt.savefig(f"{logdir}/prob.png",  dpi=600)
 plt.clf()
 
 
 # plot the functions along with the max approximation
 y_hat = torch.max(y_hat, dim=-1).indices
-fig, ax = plt.subplots(3, 3, figsize=(10, 10))
-for i in range(n_sample_functions):
-    ax[i//3][i%3].plot(to_cpu(xs), to_cpu(ys[i]), label="true", color="black")
-    ax[i//3][i%3].plot(to_cpu(xs), to_cpu(y_hat[i]), label="approx", color="blue")
-    ax[i//3][i%3].set_yticks([i for i in range(n_categories)])
-    ax[i//3][i%3].set_yticklabels(reversed([chr(ord('A') + i) for i in range(n_categories)]))
-ax[2][2].legend()
+fig, ax = plt.subplots(n_rows, n_cols, figsize=(height, width))
+for i in range(n_rows * n_cols):
+    ax[i//n_cols][i%n_cols].plot(to_cpu(xs), to_cpu(ys[i]), label="True", color="black")
+    ax[i//n_cols][i%n_cols].plot(to_cpu(xs), to_cpu(y_hat[i]), label="Estimate", color="blue")
+    ax[i//n_cols][i%n_cols].set_yticks([i for i in range(n_categories)])
+    ax[i//n_cols][i%n_cols].set_yticklabels(reversed([chr(ord('A') + i) for i in range(n_categories)]))
+
+    # increase font size
+
+
+ax[0][0].legend()
 fig.tight_layout()
 
 # save the plot
-plt.savefig(f"{logdir}/max.png")
+plt.savefig(f"{logdir}/max.png", dpi=600)
